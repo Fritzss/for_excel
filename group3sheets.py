@@ -4,7 +4,6 @@ from os import getcwd as pwd
 import configparser
 import chardet
 from copy import copy
-import sys
 from tqdm import tqdm  # Импорт библиотеки для прогресс-бара
 
 
@@ -46,9 +45,8 @@ def get_groups(ws, tag):
     current_group = None
 
     for row in tqdm(range(1, last_data_row + 1), desc="Ищем группы"):
-        outline0 = ws.row_dimensions[row].outlineLevel
-        outline1 = ws.row_dimensions[row + 1].outlineLevel
-        if outline0 == 0 and outline1 == 1:
+
+        if ws.row_dimensions[row].outlineLevel == 0 and ws.row_dimensions[row + 1].outlineLevel == 1:
             if current_group:
                 current_group["last_row"] = row - 1
                 groups.append(current_group)
@@ -78,7 +76,7 @@ def create_group_sheets(wb, groups, source_sheet, last_header_row):
     # Кеширование стилей ячеек заголовка
     header_styles = {}
     print("Кеширование стилей заголовков...")
-    for row in tqdm(range(1, last_header_row), desc="Стили заголовков"):
+    for row in range(1, last_header_row):
         for col in range(1, source_sheet.max_column + 1):
             src_cell = source_sheet.cell(row=row, column=col)
             if src_cell.has_style:
@@ -91,7 +89,6 @@ def create_group_sheets(wb, groups, source_sheet, last_header_row):
                 }
 
     # Создание листов с прогресс-баром
-    print("Создание листов групп...")
     for group in tqdm(groups, desc="Создание листов"):
         new_sheet = wb.create_sheet(title=group["filial"])
 
@@ -130,14 +127,7 @@ def copy_group_data(wb, source_sheet_name, groups, last_header_row):
 
     # Прогресс-бар для групп
     for group in tqdm(groups, desc="Копирование данных"):
-        if group["filial"] not in wb.sheetnames:
-            print(f"Пропуск группы {group['filial']} - лист не найден")
-            continue
-
         new_ws = wb[group["filial"]]
-        #start_row = group["first_row"]
-        #end_row = group["last_row"]
-        #total_rows = end_row - start_row + 1
 
         for row_idx in range(group["first_row"], group["last_row"] + 1):
             new_row_idx = row_idx - group["first_row"] + last_header_row
@@ -185,10 +175,10 @@ def main():
     last_header_row = get_first_group_row(ws)
     groups = get_groups(ws, tag)
 
-    if not groups:
+    if len(groups) == 0:
         print("Группы не найдены!")
         wb.close()
-        sys.exit(1)
+
 
     print(f"Найдено групп: {len(groups)}")
 
