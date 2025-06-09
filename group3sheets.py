@@ -1,198 +1,154 @@
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
-from os import getcwd as pwd, remove as rm
-from functools import wraps
-import time
+from os import getcwd as pwd
 import configparser
 import chardet
 from copy import copy
-
-
-print('начинаю, читаю конфиг')
-config = configparser.ConfigParser()
+import sys
+from tqdm import tqdm  # Импорт библиотеки для прогресс-бара
 
 
 def detect_encoding(fp):
     with open(fp, 'rb') as f:
         det = chardet.universaldetector.UniversalDetector()
-        for l in f:
-            det.feed(l)
+        for line in f:
+            det.feed(line)
             if det.done:
                 break
         det.close()
         return det.result['encoding']
 
 
-config.read('.\\config.ini', encoding=detect_encoding('.\\config.ini'))
-
-src_file = config.get('Settings', 'src_file')
-sheet = config.get('Settings', 'sheet')
-tag = config.get('Settings', 'tag')
-
-print(f'читаю файл {src_file}, исходный лист {sheet}')
-workdir = pwd()
-wb = load_workbook(f'{workdir}\\{src_file}', read_only=False, keep_vba=False)
-ws = wb[sheet]
-target_path = f'{workdir}\\groups2sheets-{src_file}'
+def get_first_group_row(ws):
+    """Находит первую строку группы"""
+    for row in range(1, ws.max_row + 1):
+        outline = ws.row_dimensions[row].outlineLevel
+        if outline == 0 and row + 1 <= ws.max_row:
+            next_outline = ws.row_dimensions[row + 1].outlineLevel
+            if next_outline == 1:
+                return row
+    return 6  # Значение по умолчанию
 
 
-def timeit(func):
-    @wraps(func)
-    def timeit_wrapper(*args, **kwargs):
-        start_time = time.perf_counter()
-        result = func(*args, **kwargs)
-        end_time = time.perf_counter()
-        total_time = end_time - start_time
-        print(f'Function {func.__name__} time {total_time:.4f} seconds')
-        return result
-
-    return timeit_wrapper
+def get_last_row(ws, tag):
+    """Находит последнюю строку по тегу"""
+    for row in range(ws.max_row, 0, -1):  # Оптимизировано: поиск снизу вверх
+        cell_value = ws.cell(row=row, column=1).value
+        if cell_value and tag in str(cell_value):
+            return row
+    return ws.max_row
 
 
-@timeit
-def first_row(ws):
-    f_row = 0
-    for row in ws.rows:
-        if ws.row_dimensions[row[0].row].outlineLevel == 0 and ws.row_dimensions[row[0].row + 1].outlineLevel == 1:
-            f_row = row[0].row
-            break
-    return f_row
+def get_groups(ws, tag):
+    """Получает список групп с границами строк"""
+    last_data_row = get_last_row(ws, tag)
+    groups = []
+    current_group = None
+
+    for row in tqdm(range(1, last_data_row + 1), desc="Ищем группы"):
+        outline0 = ws.row_dimensions[row].outlineLevel
+        outline1 = ws.row_dimensions[row + 1].outlineLevel
+        if outline0 == 0 and outline1 == 1:
+            if current_group:
+                current_group["last_row"] = row - 1
+                groups.append(current_group)
+
+            name = str(ws.cell(row=row, column=1).value or "").strip()
+            current_group = {
+                "filial": name,
+                "first_row": row,
+                "last_row": last_data_row
+            }
+
+    if current_group not in groups:
+        current_group["last_row"] = last_data_row
+        groups.append(current_group)
+
+    return groups
 
 
-def last_row(ws, tag):
-    l_row = 0
-    for row in ws.rows:
-        if tag in str(row[0].value):
-            l_row = row[0].row
-            break
-        if l_row == 0:
-            l_row = ws.max_row
-    return l_row
+def create_group_sheets(wb, groups, source_sheet, last_header_row):
+    """Создает листы для групп и копирует заголовки"""
+    # Сбор информации об объединенных ячейках
+    merged_ranges = [
+        m for m in source_sheet.merged_cells.ranges
+        if m.min_row < last_header_row
+    ]
 
+    # Кеширование стилей ячеек заголовка
+    header_styles = {}
+    print("Кеширование стилей заголовков...")
+    for row in tqdm(range(1, last_header_row), desc="Стили заголовков"):
+        for col in range(1, source_sheet.max_column + 1):
+            src_cell = source_sheet.cell(row=row, column=col)
+            if src_cell.has_style:
+                header_styles[(row, col)] = {
+                    "font": copy(src_cell.font),
+                    "border": copy(src_cell.border),
+                    "fill": copy(src_cell.fill),
+                    "number_format": src_cell.number_format,
+                    "alignment": copy(src_cell.alignment)
+                }
 
-def print_phrase(n: int, word: str) -> None:
-    # Определяем род слова (упрощенно)
-    last_char = word[-1].lower()
-    is_feminine = last_char in ('а')
-
-    # Выбираем форму глагола
-    if n == 1:
-        verb = "создана" if is_feminine else "создан"
-    else:
-        verb = "создано"
-
-    # Определяем форму слова
-    n_abs = abs(n)
-    if 11 <= (n_abs % 100) <= 14:
-        form = 2
-    else:
-        remainder = n_abs % 10
-        if remainder == 1:
-            form = 0
-        elif 2 <= remainder <= 4:
-            form = 1
-        else:
-            form = 2
-
-    # Склоняем слово
-    endings = {
-        'а': ['а', 'ы', ''],
-        'я': ['я', 'и', 'й'],
-        'м': ['', 'а', 'ов']  # для мужского рода
-    }
-    if is_feminine:
-        key = 'а' if last_char == 'а' else 'м'
-        base = word[:-1]
-        word_form = base + endings[key][form]
-    else:
-        base = word
-        if form == 0:
-            word_form = base
-        elif form == 1:
-            word_form = base + 'а'
-        else:
-            word_form = base + 'ов'
-
-    print(f"{verb} {n} {word_form}")
-
-
-@timeit
-def cp_header(wb, filials, target_file, last_header_row):
-    # Исходный лист
-    source_sheet = wb[sheet]
-
-    # Собираем объединенные ячейки в строках 1-5
-    merged_ranges = []
-    for merged_range in source_sheet.merged_cells.ranges:
-        if merged_range.min_row <= last_header_row and merged_range.max_row >= 1:
-            merged_ranges.append(merged_range)
-
-    # Список новых листов
-    new_sheet_names = filials[1]
-
-    for name in new_sheet_names:
-        new_sheet = wb.create_sheet(title=name["filial"])
+    # Создание листов с прогресс-баром
+    print("Создание листов групп...")
+    for group in tqdm(groups, desc="Создание листов"):
+        new_sheet = wb.create_sheet(title=group["filial"])
 
         # Копирование значений и стилей
-        for row in range(1, (last_header_row)):
-            for col in range(1, (last_header_row)):
-                source_cell = source_sheet.cell(row=row, column=col)
-                new_cell = new_sheet.cell(row=row, column=col)
-                new_cell.value = source_cell.value
-                # Исправленное копирование стилей
-                if source_cell.has_style:
-                    new_cell.font = copy(source_cell.font)
-                    new_cell.border = copy(source_cell.border)
-                    new_cell.fill = copy(source_cell.fill)
-                    new_cell.number_format = source_cell.number_format
-                    new_cell.alignment = copy(source_cell.alignment)
-        # Восстановление объединенных ячеек
+        for row in range(1, last_header_row):
+            # Копирование высоты строки
+            new_sheet.row_dimensions[row].height = source_sheet.row_dimensions[row].height
+            for col in range(1, source_sheet.max_column + 1):
+                src_cell = source_sheet.cell(row=row, column=col)
+                new_cell = new_sheet.cell(row=row, column=col, value=src_cell.value)
+
+                if (row, col) in header_styles:
+                    style = header_styles[(row, col)]
+                    new_cell.font = style["font"]
+                    new_cell.border = style["border"]
+                    new_cell.fill = style["fill"]
+                    new_cell.number_format = style["number_format"]
+                    new_cell.alignment = style["alignment"]
+
+        # Копирование объединенных ячеек
         for merged_range in merged_ranges:
-            cell_range = f"{get_column_letter(merged_range.min_col)}{merged_range.min_row}:" \
-                         f"{get_column_letter(merged_range.max_col)}{merged_range.max_row}"
-            new_sheet.merge_cells(cell_range)
+            coord = f"{get_column_letter(merged_range.min_col)}{merged_range.min_row}:" \
+                    f"{get_column_letter(merged_range.max_col)}{merged_range.max_row}"
+            new_sheet.merge_cells(coord)
+
         # Копирование ширины столбцов
-        for col in range(1, last_header_row):
+        for col in range(1, source_sheet.max_column + 1):
             col_letter = get_column_letter(col)
             new_sheet.column_dimensions[col_letter].width = \
                 source_sheet.column_dimensions[col_letter].width
 
-        for row in range(1, (last_header_row)):
-            new_sheet.row_dimensions[row].height = source_sheet.row_dimensions[row].height
-    # Сохранение изменений
-    wb.save(target_file)
-    wb.close()
 
+def copy_group_data(wb, source_sheet_name, groups, last_header_row):
+    """Копирует данные групп на соответствующие листы"""
+    src_ws = wb[source_sheet_name]
 
-@timeit
-def copy_rows_with_grouping(sheet, cities, target_file, last_header_row):
-    """
-    Копирует строки с группировками из исходного листа в новый лист
-    """
-    wb = load_workbook(target_file, read_only=False, keep_vba=False)
-    src_ws = wb[sheet]
-    filials = cities[1]
-    all_sheets = len(filials)
-    count = 0
-    for target_sheet in filials:
-        new_ws = wb[target_sheet['filial']]
-        start_row = target_sheet['first_row']
-        end_row = target_sheet['last_row']
-        print(f'осталось {all_sheets - count}, копирую лист{target_sheet["filial"]}, строки c {start_row} по {end_row}')
-        count = count + 1
-#################################################
-    # Копирование данных и стилей
-        for row_idx in range(start_row, end_row + 1):
+    # Прогресс-бар для групп
+    for group in tqdm(groups, desc="Копирование данных"):
+        if group["filial"] not in wb.sheetnames:
+            print(f"Пропуск группы {group['filial']} - лист не найден")
+            continue
+
+        new_ws = wb[group["filial"]]
+        #start_row = group["first_row"]
+        #end_row = group["last_row"]
+        #total_rows = end_row - start_row + 1
+
+        for row_idx in range(group["first_row"], group["last_row"] + 1):
+            new_row_idx = row_idx - group["first_row"] + last_header_row
+
+            # Копирование высоты строки
+            new_ws.row_dimensions[new_row_idx].height = src_ws.row_dimensions[row_idx].height
+
             for col_idx in range(1, src_ws.max_column + 1):
                 src_cell = src_ws.cell(row=row_idx, column=col_idx)
-              # print(f'row {row_idx} new {new_row_idx} start {start_row} new start {new_start_row}')
-                new_cell = new_ws.cell(
-                    row=row_idx - start_row + last_header_row,
-                    column=col_idx,
-                    value=src_cell.value
-                )
+                new_cell = new_ws.cell(row=new_row_idx, column=col_idx, value=src_cell.value)
 
-                # Копирование стилей с использованием copy()
                 if src_cell.has_style:
                     new_cell.font = copy(src_cell.font)
                     new_cell.border = copy(src_cell.border)
@@ -200,52 +156,57 @@ def copy_rows_with_grouping(sheet, cities, target_file, last_header_row):
                     new_cell.number_format = src_cell.number_format
                     new_cell.alignment = copy(src_cell.alignment)
 
-            # Копирование параметров строки
-            new_row = row_idx - start_row + last_header_row
-            new_ws.row_dimensions[new_row].outline_level = src_ws.row_dimensions[row_idx].outline_level
-            new_ws.row_dimensions[new_row].height = src_ws.row_dimensions[row_idx].height
 
+def main():
+    print("Инициализация...")
 
-        # Копирование ширины столбцов
-        for col_idx in range(1, src_ws.max_column + 1):
-            col_letter = get_column_letter(col_idx)
-            new_ws.column_dimensions[col_letter].width = \
-                src_ws.column_dimensions[col_letter].width
+    # Загрузка конфигурации
+    config = configparser.ConfigParser()
+    config_path = '.\\config.ini'
+    encoding = detect_encoding(config_path)
+    config.read(config_path, encoding=encoding)
 
-    wb.save(target_file)
+    src_file = config.get('Settings', 'src_file')
+    sheet_name = config.get('Settings', 'sheet')
+    tag = config.get('Settings', 'tag')
+
+    print(f"Обработка файла: {src_file}")
+    print(f"Исходный лист: {sheet_name}")
+    print(f"Тег: {tag}")
+
+    # Загрузка рабочей книги
+    workdir = pwd()
+    wb = load_workbook(f'{workdir}\\{src_file}', read_only=False)
+    ws = wb[sheet_name]
+    target_path = f'{workdir}\\groups2sheets-{src_file}'
+
+    # Определение групп
+    print("Поиск групп...")
+    last_header_row = get_first_group_row(ws)
+    groups = get_groups(ws, tag)
+
+    if not groups:
+        print("Группы не найдены!")
+        wb.close()
+        sys.exit(1)
+
+    print(f"Найдено групп: {len(groups)}")
+
+    # Создание листов с прогресс-баром
+    create_group_sheets(wb, groups, ws, last_header_row)
+
+    # Копирование данных с прогресс-баром
+    print("Перенос данных...")
+    copy_group_data(wb, sheet_name, groups, last_header_row)
+
+    # Сохранение результатов
+    print(f"Сохранение результата: {target_path}")
+    wb.save(target_path)
     wb.close()
 
-@timeit
-def get_cities(ws):
-    l_row = last_row(ws, tag)
-    filials = []
-    for row in ws.rows:
-        row = row[0].row
-        if ws.row_dimensions[row].outlineLevel == 0 and ws.row_dimensions[row + 1].outlineLevel == 1:
-            if len(filials) == 0:
-                filials.append({"filial": f" {(list(ws.values)[row - 1])[0]}", "first_row": row})
-            else:
-                filials.append({"filial": f" {(list(ws.values)[row - 1])[0]}", "first_row": row})
-                filials[len(filials) - 2].update({"last_row": row - 1})
-        if row >= l_row - 1:
-            filials[len(filials) - 1].update({"last_row": row - 1})
-            break
-    return l_row, filials
+    print("✅ Обработка завершена успешно")
+    input("Нажмите Enter для выхода...")
 
 
-print(f'ищу группы на листе {sheet}')
-cities = get_cities(ws)
-print('создаю листы и копирую шапку')
-last_header_row = first_row(ws)
-cp_header(wb=wb,
-          filials=cities,
-          target_file=target_path,
-          last_header_row=last_header_row)
-
-copy_rows_with_grouping(sheet=sheet,
-                        cities=cities,
-                        target_file=target_path,
-                        last_header_row=last_header_row)
-
-print(f'новая книга сохранена в файл {target_path}')
-input('press any key for close')
+if __name__ == "__main__":
+    main()
