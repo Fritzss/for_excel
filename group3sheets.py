@@ -1,6 +1,6 @@
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
-from os import getcwd as pwd
+from os import getcwd as pwd, path
 import configparser
 import chardet
 from copy import copy
@@ -38,13 +38,13 @@ def get_last_row(ws, tag):
     return ws.max_row
 
 
-def get_groups(ws, tag):
+def get_groups(ws, tag, last_header_row):
     """Получает список групп с границами строк"""
     last_data_row = get_last_row(ws, tag)
     groups = []
     current_group = None
 
-    for row in tqdm(range(1, last_data_row + 1), desc="Ищем группы"):
+    for row in tqdm(range(last_header_row, last_data_row + 1), desc="Ищем группы"):
 
         if ws.row_dimensions[row].outlineLevel == 0 and ws.row_dimensions[row + 1].outlineLevel == 1:
             if current_group:
@@ -65,6 +65,22 @@ def get_groups(ws, tag):
     return groups
 
 
+def collapse_groups(ws, header_rows):
+    # Скрываем все строки с уровнем группировки > 0
+    for row in range(header_rows + 1, ws.max_row + 1):
+        level = ws.row_dimensions[row].outline_level
+        if level > 0:
+            ws.row_dimensions[row].hidden = True
+
+    # Оставляем видимыми заголовки
+    for row in range(1, header_rows + 1):
+        ws.row_dimensions[row].hidden = False
+
+    # Настраиваем отображение группировки
+    ws.sheet_properties.outlinePr.summaryBelow = False
+    ws.sheet_properties.outlinePr.summaryRight = False
+
+
 def create_group_sheets(wb, groups, source_sheet, last_header_row):
     """Создает листы для групп и копирует заголовки"""
     # Сбор информации об объединенных ячейках
@@ -72,7 +88,6 @@ def create_group_sheets(wb, groups, source_sheet, last_header_row):
         m for m in source_sheet.merged_cells.ranges
         if m.min_row < last_header_row
     ]
-
     # Кеширование стилей ячеек заголовка
     header_styles = {}
     print("Кеширование стилей заголовков...")
@@ -91,7 +106,7 @@ def create_group_sheets(wb, groups, source_sheet, last_header_row):
     # Создание листов с прогресс-баром
     for group in tqdm(groups, desc="Создание листов"):
         new_sheet = wb.create_sheet(title=group["filial"])
-
+        new_sheet.freeze_panes = f'{get_column_letter(source_sheet.max_column + 1)}{last_header_row + 1}'
         # Копирование значений и стилей
         for row in range(1, last_header_row):
             # Копирование высоты строки
@@ -108,30 +123,36 @@ def create_group_sheets(wb, groups, source_sheet, last_header_row):
                     new_cell.number_format = style["number_format"]
                     new_cell.alignment = style["alignment"]
 
+        # Копирование ширины столбцов
+        for col in range(1, source_sheet.max_column + 2):
+            col_letter = get_column_letter(col)
+            column_width = source_sheet.column_dimensions[col_letter].width
+            new_sheet.column_dimensions[col_letter].width = column_width
+
         # Копирование объединенных ячеек
         for merged_range in merged_ranges:
             coord = f"{get_column_letter(merged_range.min_col)}{merged_range.min_row}:" \
                     f"{get_column_letter(merged_range.max_col)}{merged_range.max_row}"
             new_sheet.merge_cells(coord)
 
-        # Копирование ширины столбцов
-        for col in range(1, source_sheet.max_column + 1):
-            col_letter = get_column_letter(col)
-            new_sheet.column_dimensions[col_letter].width = \
-                source_sheet.column_dimensions[col_letter].width
 
 
-def copy_group_data(wb, source_sheet_name, groups, last_header_row):
+def copy_group_data(wb, source_sheet, groups, last_header_row):
     """Копирует данные групп на соответствующие листы"""
-    src_ws = wb[source_sheet_name]
+    src_ws = wb[source_sheet]
 
     # Прогресс-бар для групп
-    for group in tqdm(groups, desc="Копирование данных"):
+    for group in tqdm(groups, desc="Перенос данных"):
         new_ws = wb[group["filial"]]
+        merged_ranges = [
+            m for m in src_ws.merged_cells.ranges
+            if m.min_row >= group["first_row"] and m.max_row <= group["last_row"]
+        ]
 
         for row_idx in range(group["first_row"], group["last_row"] + 1):
             new_row_idx = row_idx - group["first_row"] + last_header_row
-
+            new_ws.row_dimensions[new_row_idx].outline_level = src_ws.row_dimensions[row_idx].outline_level
+            new_ws.row_dimensions[new_row_idx].height = src_ws.row_dimensions[row_idx].height
             # Копирование высоты строки
             new_ws.row_dimensions[new_row_idx].height = src_ws.row_dimensions[row_idx].height
 
@@ -145,6 +166,22 @@ def copy_group_data(wb, source_sheet_name, groups, last_header_row):
                     new_cell.fill = copy(src_cell.fill)
                     new_cell.number_format = src_cell.number_format
                     new_cell.alignment = copy(src_cell.alignment)
+
+            # Копирование ширины столбцов
+
+            # for col_idx in range(1, src_ws.max_column + 1):
+            #     col_letter = get_column_letter(col_idx)
+            #     new_ws.column_dimensions[col_letter].width = \
+            #         src_ws.column_dimensions[col_letter].width
+
+        # merged cells
+        for merged_range in merged_ranges:
+                coord = f'{get_column_letter(merged_range.min_col)}{merged_range.min_row - group["first_row"] + last_header_row}:' \
+                        f'{get_column_letter(merged_range.max_col)}{merged_range.max_row - group["first_row"] + last_header_row}'
+                new_ws.merge_cells(coord)
+
+        collapse_groups(new_ws, last_header_row)
+
 
 
 def main():
@@ -160,6 +197,11 @@ def main():
     sheet_name = config.get('Settings', 'sheet')
     tag = config.get('Settings', 'tag')
 
+    if not path.isfile(src_file):
+        print(f"Файл {src_file} не найден, проверьте config.ini[src_file] и имя файла")
+        input("Нажмите Enter для выхода...")
+        return
+
     print(f"Обработка файла: {src_file}")
     print(f"Исходный лист: {sheet_name}")
     print(f"Тег: {tag}")
@@ -169,25 +211,24 @@ def main():
     wb = load_workbook(f'{workdir}\\{src_file}', read_only=False)
     ws = wb[sheet_name]
     target_path = f'{workdir}\\groups2sheets-{src_file}'
-
     # Определение групп
     print("Поиск групп...")
     last_header_row = get_first_group_row(ws)
-    groups = get_groups(ws, tag)
+    groups = get_groups(ws, tag, last_header_row)
 
     if len(groups) == 0:
         print("Группы не найдены!")
         wb.close()
-
+        input("Нажмите Enter для выхода...")
+        return
 
     print(f"Найдено групп: {len(groups)}")
 
     # Создание листов с прогресс-баром
     create_group_sheets(wb, groups, ws, last_header_row)
-
     # Копирование данных с прогресс-баром
-    print("Перенос данных...")
     copy_group_data(wb, sheet_name, groups, last_header_row)
+
 
     # Сохранение результатов
     print(f"Сохранение результата: {target_path}")
