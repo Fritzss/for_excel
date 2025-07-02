@@ -169,13 +169,6 @@ def copy_group_data(wb, source_sheet, groups, last_header_row):
                     new_cell.number_format = src_cell.number_format
                     new_cell.alignment = copy(src_cell.alignment)
 
-            # Копирование ширины столбцов
-
-            # for col_idx in range(1, src_ws.max_column + 1):
-            #     col_letter = get_column_letter(col_idx)
-            #     new_ws.column_dimensions[col_letter].width = \
-            #         src_ws.column_dimensions[col_letter].width
-
         # merged cells
         for merged_range in merged_ranges:
                 coord = f'{get_column_letter(merged_range.min_col)}{merged_range.min_row - group["first_row"] + last_header_row}:' \
