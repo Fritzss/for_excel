@@ -126,7 +126,9 @@ def create_group_sheets(wb, groups, source_sheet, last_header_row):
         # Копирование ширины столбцов
         for col in range(1, source_sheet.max_column + 2):
             col_letter = get_column_letter(col)
-            column_width = source_sheet.column_dimensions[col_letter].width
+            column_width = source_sheet.column_dimensions[col_letter].
+            if column_width < 18.0:
+                column_width = 18.0
             new_sheet.column_dimensions[col_letter].width = column_width
 
         # Копирование объединенных ячеек
