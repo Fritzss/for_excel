@@ -1,3 +1,5 @@
+#! /usr/bin/env python
+
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 from os import getcwd as pwd, path
