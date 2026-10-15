@@ -1,0 +1,9 @@
+{
+  "name": "for-excel",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "echo \"Python project — Node build skipped\"",
+    "start": "python groups2sheets.py"
+  }
+}
